@@ -1,388 +1,119 @@
+#include "Camera.hpp"
+#include "Program.hpp"
+#include "glm/ext/matrix_clip_space.hpp"
+#include "opengl/GLBuffer.hpp"
+#include "opengl/ShaderProgram.hpp"
+#include "opengl/VertexArray.hpp"
+#include "opengl/Window.hpp"
+#include "opengl/gl_includes.hpp"
+
+#include <atomic>
 #include <cassert>
 #include <cstdlib>
 #include <fstream>
 #include <functional>
+#include <future>
 #include <iostream>
 #include <iterator>
+#include <map>
 #include <memory>
+#include <mutex>
 #include <ostream>
 #include <sstream>
+#include <thread>
+#include <unistd.h>
 #include <vector>
-
-#include "gl_includes.hpp"
-
-struct Program {
-    bool running;
-    GLFWwindow *window;
-};
-
-void clean() { glfwTerminate(); }
-
-GLFWwindow *createWindow(int width = 640, int height = 480,
-                         const char *title = "Hello, World") {
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
-    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-
-#ifdef __APPLE__
-    glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
-#endif
-
-    GLFWwindow *window = glfwCreateWindow(width, height, title, NULL, NULL);
-    if (!window) {
-        std::cerr << "Failed to create window" << std::endl;
-        exit(1);
-    }
-
-    return window;
-}
-
-Program init() {
-    atexit(clean);
-
-    if (!glfwInit()) {
-        std::cerr << "Failed to initialize GLFW" << std::endl;
-        exit(1);
-    }
-
-    int width = 640;
-    int height = 480;
-
-    GLFWwindow *window = createWindow(width, height);
-    glfwMakeContextCurrent(window);
-
-    if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
-        std::cerr << "Failed to initialize GLAD" << std::endl;
-        exit(1);
-    }
-
-    glViewport(0, 0, width, height);
-    glfwSetFramebufferSizeCallback(
-        window, [](GLFWwindow *, int newWidth, int newHeight) {
-            glViewport(0, 0, newWidth, newHeight);
-        });
-
-    return {true, window};
-}
-
-/**
- * @brief Create a Shader object
- *
- * @param type GLenum
- * @param source const char*
- *
- * @return unsigned int
- */
-unsigned int createShader(GLenum type, const char *source) {
-    unsigned int shader = glCreateShader(type);
-
-    glShaderSource(shader, 1, &source, NULL);
-    glCompileShader(shader);
-
-    int success;
-    glGetShaderiv(shader, GL_COMPILE_STATUS, &success);
-
-    if (!success) {
-        char infoLog[512];
-        glGetShaderInfoLog(shader, 512, NULL, infoLog);
-        std::cerr << "Failed to compile shader: " << infoLog << std::endl;
-        exit(1);
-    }
-
-    return shader;
-}
-
-/**
- * @brief Create a Program object
- *
- * @param vertexShader const char*
- * @param fragmentShader const char*
- *
- * @return unsigned int
- */
-unsigned int createProgram(const char *vertexShader,
-                           const char *fragmentShader) {
-    unsigned int program = glCreateProgram();
-
-    unsigned int vertex = createShader(GL_VERTEX_SHADER, vertexShader);
-    unsigned int fragment = createShader(GL_FRAGMENT_SHADER, fragmentShader);
-
-    glAttachShader(program, vertex);
-    glAttachShader(program, fragment);
-    glLinkProgram(program);
-
-    int success;
-    glGetProgramiv(program, GL_LINK_STATUS, &success);
-
-    if (!success) {
-        char infoLog[512];
-        glGetProgramInfoLog(program, 512, NULL, infoLog);
-        std::cerr << "Failed to link program: " << infoLog << std::endl;
-        exit(1);
-    }
-
-    glDeleteShader(vertex);
-    glDeleteShader(fragment);
-
-    return program;
-}
-
-/**
- * Read a file and return its contents as a string
- *
- * @param path const char*
- * @return std::string
- */
-std::string readFile(const char *path) {
-    std::fstream fs{path};
-    if (fs.fail()) {
-        std::cerr << "Failed to open file: " << path << std::endl;
-        exit(1);
-    }
-
-    std::stringstream ss;
-    ss << fs.rdbuf();
-
-    return ss.str();
-}
-
-/**
- * @brief A RAII wrapper for OpenGL shader programs
- *
- */
-class ShaderProgram {
-  public:
-    static ShaderProgram fromFiles(const char *vertexShaderPath,
-                                   const char *fragmentShaderPath) {
-        std::string vertexShader = readFile(vertexShaderPath);
-        std::string fragmentShader = readFile(fragmentShaderPath);
-
-        return {vertexShader.c_str(), fragmentShader.c_str()};
-    }
-
-    ShaderProgram(const char *vertexShader, const char *fragmentShader) {
-        this->program = createProgram(vertexShader, fragmentShader);
-    }
-
-    ShaderProgram(const ShaderProgram &) = delete;
-    ShaderProgram &operator=(const ShaderProgram &) = delete;
-
-    ShaderProgram(ShaderProgram &&other) {
-        this->program = other.program;
-        other.program = 0;
-    }
-
-    void operator=(ShaderProgram &&other) {
-        this->program = other.program;
-        other.program = 0;
-    }
-
-    ~ShaderProgram() {
-        if (this->program) {
-            glDeleteProgram(this->program);
-        }
-    }
-
-    void use() { glUseProgram(this->program); }
-    void unuse() { glUseProgram(0); }
-
-    inline unsigned int get() { return this->program; }
-
-  private:
-    unsigned int program;
-};
-
-/**
- * RAII wrapper for OpenGL Buffer Objects
- */
-class GLBuffer {
-  public:
-    GLBuffer(const GLBuffer &other) = delete;
-    void operator=(const GLBuffer &other) = delete;
-
-    GLBuffer(GLenum _target = GL_ARRAY_BUFFER) : target{_target} {
-        glGenBuffers(1, &this->id);
-        if (!this->id) {
-            std::cerr << "Failed to create VBO" << std::endl;
-            exit(1);
-        }
-    }
-
-    GLBuffer(GLBuffer &&other) noexcept {
-        this->id = other.id;
-        this->target = other.target;
-        this->isBound = other.isBound;
-
-        other.id = 0;
-    }
-
-    ~GLBuffer() {
-        if (this->id) {
-            glDeleteBuffers(1, &this->id);
-        }
-    }
-
-    void operator=(GLBuffer &&other) noexcept {
-        this->id = other.id;
-        this->target = other.target;
-
-        other.id = 0;
-    }
-
-    void bind() {
-        assert(this->id);
-        this->isBound = true;
-        glBindBuffer(this->target, this->id);
-    }
-
-    void unbind() {
-        this->isBound = false;
-        glBindBuffer(this->target, 0);
-    }
-
-    void bufferData(GLsizeiptr size, const void *data, GLenum usage) {
-        assert(this->id);
-
-        if (!this->isBound) {
-            this->bind();
-        }
-
-        glBufferData(this->target, size, data, usage);
-    }
-
-    unsigned int get() { return this->id; }
-
-  private:
-    unsigned int id;
-    bool isBound = false;
-    GLenum target;
-};
-
-/**
- * RAII wrapper for OpenGL Vertex Array Objects
- */
-class VAO {
-  public:
-    VAO(const VAO &other) = delete;
-    void operator=(const VAO &other) = delete;
-
-    VAO() {
-        glGenVertexArrays(1, &this->id);
-        if (!this->id) {
-            std::cerr << "Failed to create VAO" << std::endl;
-            exit(1);
-        }
-    }
-
-    VAO(std::function<void(VAO &)> setup) : VAO{} {
-        this->bind();
-        setup(*this);
-        this->unbind();
-    }
-
-    VAO(VAO &&other) {
-        this->id = other.id;
-        this->isBound = other.isBound;
-
-        other.id = 0;
-        other.isBound = false;
-    }
-
-    ~VAO() {
-        if (this->id) {
-            glDeleteVertexArrays(1, &this->id);
-        }
-    }
-
-    void operator=(VAO &&other) {
-        this->id = other.id;
-        this->isBound = other.isBound;
-
-        other.id = 0;
-        other.isBound = false;
-    }
-
-    void bind() {
-        this->isBound = true;
-        glBindVertexArray(this->id);
-    }
-
-    void unbind() {
-        this->isBound = false;
-        glBindVertexArray(0);
-
-        for (auto &buffer : this->buffers) {
-            buffer->unbind();
-        }
-    }
-
-    void vertexAttribPointer(unsigned int index, int size, GLenum type,
-                             bool normalized, int stride, void *pointer) {
-        assert(this->isBound && "VAO is not bound");
-
-        glVertexAttribPointer(index, size, type, normalized, stride, pointer);
-        glEnableVertexAttribArray(index);
-    }
-
-    GLBuffer &addBuffer(GLenum target = GL_ARRAY_BUFFER) {
-        this->buffers.emplace_back(std::make_unique<GLBuffer>(target));
-        return *this->buffers.back();
-    }
-
-    GLBuffer &getBuffer(unsigned int index) {
-        assert(index < this->buffers.size());
-        return *this->buffers[index];
-    }
-
-    unsigned int get() { return this->id; }
-
-  private:
-    unsigned int id;
-    bool isBound = false;
-    std::vector<std::unique_ptr<GLBuffer>> buffers;
-};
-
-inline bool isKeyPressed(GLFWwindow *window, int key) {
-    return glfwGetKey(window, key) == GLFW_PRESS;
-}
-
-void events(Program &program) {
-    glfwPollEvents();
-
-    if (isKeyPressed(program.window, GLFW_KEY_ESCAPE) ||
-        glfwWindowShouldClose(program.window)) {
-        program.running = false;
-    }
-}
 
 inline void clearScreen() {
     glClearColor(0.2f, 0.3f, 0.9f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
 }
 
-void render(Program &program, VAO &vao, ShaderProgram &shaderProgram) {
+float x_pos = 0.0f;
+float look_at_x = 0.0f;
+
+void events(mine::Program &program, mine::Camera &camera) {
+    static std::map<int, mine::Camera::Direction> keyToDirection{
+        {GLFW_KEY_W, mine::Camera::Direction::FORWARD},
+        {GLFW_KEY_S, mine::Camera::Direction::BACKWARD},
+
+        {GLFW_KEY_A, mine::Camera::Direction::LEFT},
+        {GLFW_KEY_D, mine::Camera::Direction::RIGHT},
+
+        {GLFW_KEY_Z, mine::Camera::Direction::UP},
+        {GLFW_KEY_X, mine::Camera::Direction::DOWN},
+    };
+
+    mine::opengl::Window &window = program.getWindow();
+    window.pollEvents();
+
+    if (window.isKeyPressed(GLFW_KEY_ESCAPE) || window.shouldClose()) {
+        program.stop();
+    }
+
+    for (auto [key, direction] : keyToDirection) {
+        if (window.isKeyPressed(key)) {
+            camera.move(direction);
+        }
+    }
+
+    camera.handleMouseMovement(window.getCursorPos());
+}
+
+void render(mine::Program &program, mine::opengl::VertexArray &vao,
+            mine::opengl::ShaderProgram &shaderProgram, mine::Camera &camera) {
     clearScreen();
 
     shaderProgram.use();
+
     vao.bind();
 
-    // Draw the square
+    const mine::opengl::Window &window{program.getWindow()};
+
+    float width{static_cast<float>(window.getWidth())};
+    float height{static_cast<float>(window.getHeight())};
+
+    float near{0.1};
+    float far{100.0};
+
+    glm::mat4 projection{
+        glm::perspective(glm::radians(45.0f), width / height, near, far)};
+
+    glm::mat4 view{camera.calculateLookAtMatrix()};
+    glm::mat4 model{glm::mat4(1.0f)};
+
+    glm::mat4 mvp{projection * view * model};
+
+    shaderProgram.uniform<3>("offset", glm::vec3{-0.0f, 0.5f, 0.2f});
+    shaderProgram.uniform<4>("color", glm::vec4{1.0f, 0.5f, 0.2f, 1.0f});
+    shaderProgram.uniform<4>("mvp", mvp);
+
     glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
 
     shaderProgram.unuse();
 
     vao.unbind();
 
-    glfwSwapBuffers(program.window);
+    program.getWindow().swapBuffers();
+}
+
+void init() {
+    atexit([]() { glfwTerminate(); });
+    if (!glfwInit()) {
+        std::cerr << "Failed to initialize GLFW" << std::endl;
+        exit(1);
+    }
 }
 
 int main() {
-    Program program = init();
+    init();
 
-    ShaderProgram shaderProgram = ShaderProgram::fromFiles(
-        "shaders/vertex.glsl", "shaders/fragment.glsl");
+    mine::Program program;
 
-    VAO vao{[](VAO &vao) {
+    auto shaderProgram{mine::opengl::ShaderProgram::fromFiles(
+        "shaders/vertex.glsl", "shaders/fragment.glsl")};
+
+    mine::opengl::VertexArray vao{[](mine::opengl::VertexArray &vao) {
         // Square vertices
         float vertices[] = {
             0.5f,  0.5f,  0.0f, // top right
@@ -392,13 +123,12 @@ int main() {
         };
 
         unsigned int indices[] = {
-            // note that we start from 0!
             0, 1, 3, // first Triangle
             1, 2, 3  // second Triangle
         };
 
-        GLBuffer &vbo{vao.addBuffer()};
-        GLBuffer &ebo{vao.addBuffer(GL_ELEMENT_ARRAY_BUFFER)};
+        auto &vbo{vao.addBuffer()};
+        auto &ebo{vao.addBuffer(GL_ELEMENT_ARRAY_BUFFER)};
 
         vbo.bufferData(sizeof(vertices), vertices, GL_STATIC_DRAW);
         ebo.bufferData(sizeof(indices), indices, GL_STATIC_DRAW);
@@ -406,9 +136,12 @@ int main() {
         vao.vertexAttribPointer(0, 3, GL_FLOAT, false, 3 * sizeof(float), 0);
     }};
 
-    while (program.running) {
-        events(program);
-        render(program, vao, shaderProgram);
+    mine::Camera camera{0.3f, 0.01f};
+    camera.setPosition({0.0f, 0.0f, -1.0f});
+
+    while (program.isRunning()) {
+        events(program, camera);
+        render(program, vao, shaderProgram, camera);
     }
 
     return 0;

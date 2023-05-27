@@ -2,7 +2,13 @@ file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/shaders DESTINATION ${CMAKE_CURRENT_BINARY
 
 set(SOURCES
     main.cpp
-    saske.cpp
+    opengl/ShaderProgram.cpp
+    opengl/VertexArray.cpp
+    opengl/GLBuffer.cpp
+    opengl/Window.cpp
+    Program.cpp
+    utils/fs.cpp
+    Camera.cpp
 )
 
 set(LIBS

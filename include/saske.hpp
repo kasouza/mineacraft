@@ -1,6 +1,0 @@
-#ifndef KASOUZA_MINECRAFT_SASKE_HPP
-#define KASOUZA_MINECRAFT_SASKE_HPP
-
-void saske();
-
-#endif
